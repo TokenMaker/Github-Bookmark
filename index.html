@@ -47,14 +47,16 @@
           </div>
         </div>
         <div id="suggestions" class="suggestions hidden" aria-live="polite"></div>
-        <button id="add-btn" aria-label="Add bookmark">
-          ADD &nbsp;→
-        </button>
+        <button id="add-btn" aria-label="Add bookmark">ADD &nbsp;→</button>
       </div>
     </div>
 
+    <!-- Sync status bar -->
+    <div id="sync-status-bar" class="sync-status-bar hidden">
+      <span id="sync-status-text"></span>
+    </div>
+
     <p id="error-msg" class="error-msg hidden" role="alert"></p>
-    <div class="header-rule"></div>
   </header>
 
   <!-- ── Filter bar ───────────────────────────────────────────────── -->
@@ -64,7 +66,7 @@
     </div>
   </div>
 
-  <!-- ── Toolbar: search + sort ────────────────────────────────────── -->
+  <!-- ── Toolbar: search + sort + sync actions ─────────────────────── -->
   <div id="toolbar" class="toolbar hidden">
     <div class="toolbar-inner">
       <div class="search-wrapper">
@@ -86,6 +88,14 @@
           <option value="alpha">A → Z</option>
           <option value="stars">Most Stars</option>
         </select>
+      </div>
+      <div class="toolbar-actions">
+        <button id="sync-btn" class="toolbar-btn" title="Sync settings">⇅ SYNC</button>
+        <button id="export-btn" class="toolbar-btn" title="Export bookmarks as JSON">↓ EXPORT</button>
+        <label class="toolbar-btn" title="Import bookmarks from JSON" tabindex="0">
+          ↑ IMPORT
+          <input type="file" id="import-file" accept=".json" aria-label="Import JSON file" />
+        </label>
       </div>
     </div>
     <p id="search-result-count" class="search-result-count hidden" aria-live="polite"></p>
@@ -110,6 +120,63 @@
       <span class="footer-brand">GitHub Bookmarks</span>
     </div>
   </footer>
+
+  <!-- ── Sync Modal ────────────────────────────────────────────────── -->
+  <div id="sync-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title" id="modal-title">Sync via GitHub Gist</h2>
+        <button class="modal-close" id="modal-close" aria-label="Close">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <p class="modal-desc">
+          Your bookmarks are saved to a <strong>private GitHub Gist</strong>. Open this site on any device, enter the same token, and your collection loads automatically.
+        </p>
+
+        <div class="modal-field">
+          <label class="modal-label" for="token-input">PERSONAL ACCESS TOKEN</label>
+          <div class="modal-input-row">
+            <input
+              type="password"
+              id="token-input"
+              class="modal-input"
+              placeholder="github_pat_…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="modal-btn modal-btn--outline" id="token-toggle" type="button" aria-label="Show token">SHOW</button>
+          </div>
+          <p class="modal-hint">
+            Create a token at <strong>github.com → Settings → Developer settings → Personal access tokens</strong>.<br/>
+            Only the <code>gist</code> scope is required.
+          </p>
+        </div>
+
+        <div class="modal-field" id="gist-id-field">
+          <label class="modal-label" for="gist-id-input">GIST ID <span style="font-weight:400;opacity:.6">(auto-filled after first save)</span></label>
+          <input
+            type="text"
+            id="gist-id-input"
+            class="modal-input"
+            placeholder="Leave blank to create a new Gist"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <div id="sync-modal-status" class="sync-modal-status hidden"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="modal-btn modal-btn--ghost" id="disconnect-btn" type="button">Disconnect</button>
+        <div style="display:flex;gap:10px;">
+          <button class="modal-btn modal-btn--outline" id="pull-btn" type="button">↓ Load from Gist</button>
+          <button class="modal-btn modal-btn--primary" id="push-btn" type="button">↑ Save to Gist</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

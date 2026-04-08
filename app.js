@@ -1,31 +1,50 @@
 'use strict';
 
-const STORAGE_KEY    = 'gh-bookmarks';
-const DEFAULT_CAT    = 'Uncategorized';
+const STORAGE_KEY     = 'gh-bookmarks';
+const SYNC_TOKEN_KEY  = 'gh-bm-token';
+const SYNC_GIST_KEY   = 'gh-bm-gist-id';
+const GIST_FILENAME   = 'github-bookmarks.json';
+const DEFAULT_CAT     = 'Uncategorized';
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
-const input           = document.getElementById('url-input');
-const categoryInput   = document.getElementById('category-input');
-const categorySuggest = document.getElementById('category-suggestions');
-const suggestionsEl   = document.getElementById('suggestions');
-const addBtn          = document.getElementById('add-btn');
-const errorEl         = document.getElementById('error-msg');
-const grid            = document.getElementById('grid');
-const empty           = document.getElementById('empty-state');
-const footerCount     = document.getElementById('footer-count');
-const filterBar       = document.getElementById('filter-bar');
-const filterBarInner  = filterBar.querySelector('.filter-bar-inner');
-const toolbar         = document.getElementById('toolbar');
-const searchInput     = document.getElementById('search-input');
-const searchClear     = document.getElementById('search-clear');
-const searchCount     = document.getElementById('search-result-count');
-const sortSelect      = document.getElementById('sort-select');
+const input            = document.getElementById('url-input');
+const categoryInput    = document.getElementById('category-input');
+const categorySuggest  = document.getElementById('category-suggestions');
+const suggestionsEl    = document.getElementById('suggestions');
+const addBtn           = document.getElementById('add-btn');
+const errorEl          = document.getElementById('error-msg');
+const grid             = document.getElementById('grid');
+const empty            = document.getElementById('empty-state');
+const footerCount      = document.getElementById('footer-count');
+const filterBar        = document.getElementById('filter-bar');
+const filterBarInner   = filterBar.querySelector('.filter-bar-inner');
+const toolbar          = document.getElementById('toolbar');
+const searchInput      = document.getElementById('search-input');
+const searchClear      = document.getElementById('search-clear');
+const searchCount      = document.getElementById('search-result-count');
+const sortSelect       = document.getElementById('sort-select');
+const syncStatusBar    = document.getElementById('sync-status-bar');
+const syncStatusText   = document.getElementById('sync-status-text');
+// Toolbar buttons
+const syncBtn          = document.getElementById('sync-btn');
+const exportBtn        = document.getElementById('export-btn');
+const importFile       = document.getElementById('import-file');
+// Modal
+const syncModal        = document.getElementById('sync-modal');
+const modalClose       = document.getElementById('modal-close');
+const tokenInput       = document.getElementById('token-input');
+const tokenToggle      = document.getElementById('token-toggle');
+const gistIdInput      = document.getElementById('gist-id-input');
+const syncModalStatus  = document.getElementById('sync-modal-status');
+const pushBtn          = document.getElementById('push-btn');
+const pullBtn          = document.getElementById('pull-btn');
+const disconnectBtn    = document.getElementById('disconnect-btn');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let bookmarks      = loadBookmarks();
 let activeCategory = '__all__';
 let searchQuery    = '';
-let sortOrder      = 'date'; // 'date' | 'alpha' | 'stars'
+let sortOrder      = 'date';
 let urlDebounce    = null;
 let searchDebounce = null;
 
@@ -33,12 +52,18 @@ let searchDebounce = null;
 renderAll();
 renderFilterBar();
 updateCategorySuggestions();
+initSyncUI();
 
+// If token + gist already configured, auto-pull on load
+if (localStorage.getItem(SYNC_TOKEN_KEY) && localStorage.getItem(SYNC_GIST_KEY)) {
+  autoPullOnLoad();
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
 input.addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
 categoryInput.addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
 addBtn.addEventListener('click', handleAdd);
 
-// Search
 searchInput.addEventListener('input', () => {
   clearTimeout(searchDebounce);
   searchDebounce = setTimeout(() => {
@@ -56,13 +81,12 @@ searchClear.addEventListener('click', () => {
   renderAll();
 });
 
-// Sort
 sortSelect.addEventListener('change', () => {
   sortOrder = sortSelect.value;
   renderAll();
 });
 
-// Smart suggestions while typing a URL
+// URL suggestions
 input.addEventListener('input', () => {
   clearTimeout(urlDebounce);
   const raw = input.value.trim();
@@ -70,6 +94,26 @@ input.addEventListener('input', () => {
   if (!parsed) { hideSuggestions(); return; }
   urlDebounce = setTimeout(() => fetchSuggestions(parsed.owner, parsed.repo), 600);
 });
+
+// Export / Import
+exportBtn.addEventListener('click', exportJSON);
+importFile.addEventListener('change', importJSON);
+
+// Sync modal
+syncBtn.addEventListener('click', openModal);
+modalClose.addEventListener('click', closeModal);
+syncModal.addEventListener('click', e => { if (e.target === syncModal) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+tokenToggle.addEventListener('click', () => {
+  const show = tokenInput.type === 'password';
+  tokenInput.type = show ? 'text' : 'password';
+  tokenToggle.textContent = show ? 'HIDE' : 'SHOW';
+});
+
+pushBtn.addEventListener('click', pushToGist);
+pullBtn.addEventListener('click', pullFromGist);
+disconnectBtn.addEventListener('click', disconnect);
 
 // ── Add ───────────────────────────────────────────────────────────────────────
 async function handleAdd() {
@@ -125,6 +169,11 @@ async function handleAdd() {
     skeletonCard.replaceWith(realCard);
     renderFilterBar();
     updateCategorySuggestions();
+
+    // Auto-push if sync configured
+    if (localStorage.getItem(SYNC_TOKEN_KEY) && localStorage.getItem(SYNC_GIST_KEY)) {
+      silentPush();
+    }
   } catch (err) {
     skeletonCard.remove();
     showError(err.message);
@@ -132,81 +181,6 @@ async function handleAdd() {
     setLoading(false);
     updateEmptyState();
   }
-}
-
-// ── Smart category suggestions ────────────────────────────────────────────────
-async function fetchSuggestions(owner, repo) {
-  try {
-    const data = await fetchRepo(owner, repo);
-    const chips = buildSuggestions(data);
-    renderSuggestions(chips);
-  } catch {
-    hideSuggestions();
-  }
-}
-
-function buildSuggestions(data) {
-  const candidates = new Set();
-
-  // 1. GitHub topics are the most explicit signal
-  (data.topics || []).forEach(t => candidates.add(toTitleCase(t.replace(/-/g, ' '))));
-
-  // 2. Language → category
-  if (data.language) candidates.add(data.language);
-
-  // 3. Keyword scan over name + description
-  const text = `${data.name} ${data.description || ''}`.toLowerCase();
-  const KEYWORD_MAP = [
-    [/\b(ai|llm|gpt|machine.?learning|deep.?learning|neural|nlp|diffusion|stable.?diffusion|langchain|openai|anthropic|hugging.?face)\b/, 'AI'],
-    [/\b(react|vue|angular|svelte|next\.?js|nuxt|remix|frontend|ui.?library|component)\b/, 'Frontend'],
-    [/\b(api|backend|server|express|fastapi|django|rails|rest|graphql|grpc|microservice)\b/, 'Backend'],
-    [/\b(cli|terminal|shell|command.?line|tui)\b/, 'CLI Tools'],
-    [/\b(docker|kubernetes|k8s|terraform|ansible|devops|infra|helm|cicd|ci\/cd)\b/, 'DevOps'],
-    [/\b(ios|android|flutter|react.?native|mobile|swift|kotlin)\b/, 'Mobile'],
-    [/\b(database|sql|postgres|mysql|mongo|redis|sqlite|orm|prisma)\b/, 'Database'],
-    [/\b(security|auth|crypto|jwt|oauth|vulnerability|pentest|encryption)\b/, 'Security'],
-    [/\b(game|unity|godot|opengl|vulkan|pygame|phaser)\b/, 'Games'],
-    [/\b(data|analytics|visualization|pandas|numpy|spark|tableau|etl|pipeline)\b/, 'Data'],
-    [/\b(testing|test|jest|pytest|cypress|playwright|e2e)\b/, 'Testing'],
-    [/\b(design|figma|css|sass|tailwind|typography|icon)\b/, 'Design'],
-    [/\b(blockchain|web3|solidity|ethereum|nft|defi)\b/, 'Web3'],
-  ];
-
-  KEYWORD_MAP.forEach(([re, label]) => {
-    if (re.test(text)) candidates.add(label);
-  });
-
-  // 4. Prepend user's existing categories as quick-pick options
-  getCategories()
-    .filter(c => c !== DEFAULT_CAT)
-    .slice(0, 3)
-    .forEach(c => candidates.add(c));
-
-  return [...candidates].slice(0, 8);
-}
-
-function renderSuggestions(chips) {
-  if (!chips.length) { hideSuggestions(); return; }
-
-  suggestionsEl.innerHTML = `<span class="suggestions-label">Suggest:</span>` +
-    chips.map(c =>
-      `<button class="suggestion-chip" type="button">${escHtml(c)}</button>`
-    ).join('');
-
-  suggestionsEl.querySelectorAll('.suggestion-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      categoryInput.value = btn.textContent;
-      hideSuggestions();
-      categoryInput.focus();
-    });
-  });
-
-  suggestionsEl.classList.remove('hidden');
-}
-
-function hideSuggestions() {
-  suggestionsEl.classList.add('hidden');
-  suggestionsEl.innerHTML = '';
 }
 
 // ── Parse URL ─────────────────────────────────────────────────────────────────
@@ -240,30 +214,26 @@ async function fetchRepo(owner, repo) {
 function renderAll() {
   grid.innerHTML = '';
 
-  // 1. Category filter
   let pool = activeCategory === '__all__'
     ? bookmarks
     : bookmarks.filter(b => (b.category || DEFAULT_CAT) === activeCategory);
 
-  // 2. Search filter
   if (searchQuery) {
     pool = pool.filter(b =>
       b.fullName.toLowerCase().includes(searchQuery) ||
       (b.description || '').toLowerCase().includes(searchQuery) ||
-      (b.language  || '').toLowerCase().includes(searchQuery) ||
-      (b.category  || '').toLowerCase().includes(searchQuery) ||
-      (b.topics    || []).some(t => t.toLowerCase().includes(searchQuery))
+      (b.language    || '').toLowerCase().includes(searchQuery) ||
+      (b.category    || '').toLowerCase().includes(searchQuery) ||
+      (b.topics      || []).some(t => t.toLowerCase().includes(searchQuery))
     );
   }
 
-  // 3. Sort
   pool = [...pool].sort((a, b) => {
     if (sortOrder === 'alpha') return a.fullName.localeCompare(b.fullName);
     if (sortOrder === 'stars') return (b.stars || 0) - (a.stars || 0);
-    return b.addedAt - a.addedAt; // 'date' — newest first
+    return b.addedAt - a.addedAt;
   });
 
-  // Update search result count
   if (searchQuery) {
     searchCount.textContent = pool.length === 0
       ? `No results for "${searchInput.value.trim()}"`
@@ -275,7 +245,6 @@ function renderAll() {
 
   if (pool.length === 0) { updateEmptyState(); return; }
 
-  // 4. Group by category (skip headers when searching or filtered to one category)
   const groups = new Map();
   for (const b of pool) {
     const cat = b.category || DEFAULT_CAT;
@@ -348,11 +317,12 @@ function createCard(bookmark) {
 
   card.querySelector('.card-remove').addEventListener('click', () => removeBookmark(bookmark.id));
 
-  // Inline category editing
   const catChip = card.querySelector('.meta-item--category');
   const startEdit = () => editCategory(card, catChip, bookmark);
   catChip.addEventListener('click', startEdit);
-  catChip.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEdit(); } });
+  catChip.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEdit(); }
+  });
 
   return card;
 }
@@ -361,57 +331,55 @@ function createCard(bookmark) {
 function editCategory(card, chip, bookmark) {
   const current = bookmark.category || DEFAULT_CAT;
 
-  const listId = 'inline-cat-list';
-  let datalist = document.getElementById(listId);
+  let datalist = document.getElementById('inline-cat-list');
   if (!datalist) {
     datalist = document.createElement('datalist');
-    datalist.id = listId;
+    datalist.id = 'inline-cat-list';
     document.body.appendChild(datalist);
   }
   datalist.innerHTML = getCategories().map(c => `<option value="${escHtml(c)}">`).join('');
 
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'category-inline-edit';
-  input.value = current;
-  input.setAttribute('list', listId);
-  input.setAttribute('aria-label', 'Edit category');
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'category-inline-edit';
+  inp.value = current;
+  inp.setAttribute('list', 'inline-cat-list');
+  inp.setAttribute('aria-label', 'Edit category');
 
-  chip.replaceWith(input);
-  input.focus();
-  input.select();
+  chip.replaceWith(inp);
+  inp.focus();
+  inp.select();
 
   const commit = () => {
-    const val = input.value.trim() || DEFAULT_CAT;
+    const val = inp.value.trim() || DEFAULT_CAT;
     bookmark.category = val;
     saveBookmarks();
 
-    // Update chip text
     const newChip = document.createElement('span');
     newChip.className = 'meta-item meta-item--category';
     newChip.title = 'Click to edit category';
-    newChip.role = 'button';
+    newChip.setAttribute('role', 'button');
     newChip.tabIndex = 0;
     newChip.textContent = val;
-    input.replaceWith(newChip);
+    inp.replaceWith(newChip);
 
     const startEdit = () => editCategory(card, newChip, bookmark);
     newChip.addEventListener('click', startEdit);
-    newChip.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEdit(); } });
+    newChip.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEdit(); }
+    });
 
     renderFilterBar();
     updateCategorySuggestions();
+    if (activeCategory !== '__all__' && val !== activeCategory) renderAll();
 
-    // Re-render if viewing a category that no longer matches
-    if (activeCategory !== '__all__' && val !== activeCategory) {
-      renderAll();
-    }
+    if (localStorage.getItem(SYNC_TOKEN_KEY) && localStorage.getItem(SYNC_GIST_KEY)) silentPush();
   };
 
-  input.addEventListener('blur', commit);
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-    if (e.key === 'Escape') { input.value = current; input.blur(); }
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') { inp.value = current; inp.blur(); }
   });
 }
 
@@ -444,7 +412,6 @@ function removeBookmark(id) {
     el.style.opacity = '0';
     setTimeout(() => {
       el.remove();
-      // Clean up orphaned category headers
       grid.querySelectorAll('.category-header').forEach(h => {
         const next = h.nextElementSibling;
         if (!next || next.classList.contains('category-header')) h.remove();
@@ -454,13 +421,13 @@ function removeBookmark(id) {
       updateEmptyState();
     }, 120);
   }
+
+  if (localStorage.getItem(SYNC_TOKEN_KEY) && localStorage.getItem(SYNC_GIST_KEY)) silentPush();
 }
 
 // ── Filter bar ────────────────────────────────────────────────────────────────
 function renderFilterBar() {
-  const categories = getCategories();
   const hasBookmarks = bookmarks.length > 0;
-
   filterBar.classList.toggle('hidden', !hasBookmarks);
   toolbar.classList.toggle('hidden', !hasBookmarks);
 
@@ -468,7 +435,7 @@ function renderFilterBar() {
   if (!hasBookmarks) return;
 
   filterBarInner.appendChild(makeTab('ALL', '__all__'));
-  categories.forEach(cat => {
+  getCategories().forEach(cat => {
     const count = bookmarks.filter(b => (b.category || DEFAULT_CAT) === cat).length;
     filterBarInner.appendChild(makeTab(`${cat} (${count})`, cat));
   });
@@ -497,9 +464,289 @@ function getCategories() {
 
 function updateCategorySuggestions() {
   if (!categorySuggest) return;
-  categorySuggest.innerHTML = getCategories()
-    .map(c => `<option value="${escHtml(c)}">`)
-    .join('');
+  categorySuggest.innerHTML = getCategories().map(c => `<option value="${escHtml(c)}">`).join('');
+}
+
+// ── Smart category suggestions ────────────────────────────────────────────────
+async function fetchSuggestions(owner, repo) {
+  try {
+    const data = await fetchRepo(owner, repo);
+    renderSuggestions(buildSuggestions(data));
+  } catch { hideSuggestions(); }
+}
+
+function buildSuggestions(data) {
+  const candidates = new Set();
+  (data.topics || []).forEach(t => candidates.add(toTitleCase(t.replace(/-/g, ' '))));
+  if (data.language) candidates.add(data.language);
+
+  const text = `${data.name} ${data.description || ''}`.toLowerCase();
+  const KEYWORD_MAP = [
+    [/\b(ai|llm|gpt|machine.?learning|deep.?learning|neural|nlp|diffusion|langchain|openai|anthropic|hugging.?face)\b/, 'AI'],
+    [/\b(react|vue|angular|svelte|next\.?js|nuxt|remix|frontend|ui.?library|component)\b/, 'Frontend'],
+    [/\b(api|backend|server|express|fastapi|django|rails|rest|graphql|grpc|microservice)\b/, 'Backend'],
+    [/\b(cli|terminal|shell|command.?line|tui)\b/, 'CLI Tools'],
+    [/\b(docker|kubernetes|k8s|terraform|ansible|devops|infra|helm|cicd)\b/, 'DevOps'],
+    [/\b(ios|android|flutter|react.?native|mobile|swift|kotlin)\b/, 'Mobile'],
+    [/\b(database|sql|postgres|mysql|mongo|redis|sqlite|orm|prisma)\b/, 'Database'],
+    [/\b(security|auth|crypto|jwt|oauth|vulnerability|pentest|encryption)\b/, 'Security'],
+    [/\b(game|unity|godot|opengl|vulkan|pygame|phaser)\b/, 'Games'],
+    [/\b(data|analytics|visualization|pandas|numpy|spark|etl|pipeline)\b/, 'Data'],
+    [/\b(testing|test|jest|pytest|cypress|playwright|e2e)\b/, 'Testing'],
+    [/\b(design|figma|css|sass|tailwind|typography|icon)\b/, 'Design'],
+    [/\b(blockchain|web3|solidity|ethereum|nft|defi)\b/, 'Web3'],
+  ];
+  KEYWORD_MAP.forEach(([re, label]) => { if (re.test(text)) candidates.add(label); });
+  getCategories().filter(c => c !== DEFAULT_CAT).slice(0, 3).forEach(c => candidates.add(c));
+  return [...candidates].slice(0, 8);
+}
+
+function renderSuggestions(chips) {
+  if (!chips.length) { hideSuggestions(); return; }
+  suggestionsEl.innerHTML = `<span class="suggestions-label">Suggest:</span>` +
+    chips.map(c => `<button class="suggestion-chip" type="button">${escHtml(c)}</button>`).join('');
+  suggestionsEl.querySelectorAll('.suggestion-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      categoryInput.value = btn.textContent;
+      hideSuggestions();
+      categoryInput.focus();
+    });
+  });
+  suggestionsEl.classList.remove('hidden');
+}
+
+function hideSuggestions() {
+  suggestionsEl.classList.add('hidden');
+  suggestionsEl.innerHTML = '';
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+function exportJSON() {
+  const blob = new Blob([JSON.stringify(bookmarks, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'github-bookmarks.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Import ────────────────────────────────────────────────────────────────────
+function importJSON(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = evt => {
+    try {
+      const imported = JSON.parse(evt.target.result);
+      if (!Array.isArray(imported)) throw new Error('Invalid format');
+
+      // Merge: keep existing, add new ones
+      const existingIds = new Set(bookmarks.map(b => b.id));
+      const newOnes = imported.filter(b => b.id && !existingIds.has(b.id))
+        .map(b => ({ category: DEFAULT_CAT, topics: [], ...b }));
+
+      bookmarks = [...newOnes, ...bookmarks];
+      saveBookmarks();
+      renderAll();
+      renderFilterBar();
+      updateCategorySuggestions();
+      setSyncStatus('ok', `Imported ${newOnes.length} new bookmark${newOnes.length === 1 ? '' : 's'}.`);
+    } catch {
+      setSyncStatus('error', 'Import failed — invalid JSON file.');
+    }
+    importFile.value = '';
+  };
+  reader.readAsText(file);
+}
+
+// ── Gist Sync ─────────────────────────────────────────────────────────────────
+function initSyncUI() {
+  const token  = localStorage.getItem(SYNC_TOKEN_KEY) || '';
+  const gistId = localStorage.getItem(SYNC_GIST_KEY)  || '';
+  tokenInput.value  = token;
+  gistIdInput.value = gistId;
+  if (token && gistId) setSyncStatus('ok', `Synced via Gist · ${gistId.slice(0, 8)}…`);
+}
+
+async function autoPullOnLoad() {
+  try {
+    const pulled = await gistFetch();
+    if (pulled) mergeFromGist(pulled);
+  } catch { /* silent — don't disrupt page load */ }
+}
+
+async function pushToGist() {
+  const token = tokenInput.value.trim();
+  if (!token) { setModalStatus('error', 'Please enter a Personal Access Token.'); return; }
+
+  setModalStatus('busy', 'Saving to Gist…');
+  setBtnsDisabled(true);
+
+  try {
+    const gistId = gistIdInput.value.trim() || localStorage.getItem(SYNC_GIST_KEY) || '';
+    const body   = JSON.stringify(bookmarks, null, 2);
+    let res, data;
+
+    if (gistId) {
+      // Update existing gist
+      res = await fetch(`https://api.github.com/gists/${gistId}`, {
+        method:  'PATCH',
+        headers: gistHeaders(token),
+        body:    JSON.stringify({ files: { [GIST_FILENAME]: { content: body } } }),
+      });
+    } else {
+      // Create new private gist
+      res = await fetch('https://api.github.com/gists', {
+        method:  'POST',
+        headers: gistHeaders(token),
+        body:    JSON.stringify({
+          description: 'GitHub Bookmarks — App Data',
+          public:      false,
+          files:       { [GIST_FILENAME]: { content: body } },
+        }),
+      });
+    }
+
+    if (res.status === 401) throw new Error('Invalid token — check your Personal Access Token.');
+    if (!res.ok) throw new Error(`GitHub API error (${res.status}).`);
+
+    data = await res.json();
+
+    localStorage.setItem(SYNC_TOKEN_KEY, token);
+    localStorage.setItem(SYNC_GIST_KEY,  data.id);
+    gistIdInput.value = data.id;
+
+    const ts = new Date().toLocaleTimeString();
+    setModalStatus('ok', `Saved ✓ — Gist ID: ${data.id}`);
+    setSyncStatus('ok', `Last synced ${ts} · Gist ${data.id.slice(0, 8)}…`);
+  } catch (err) {
+    setModalStatus('error', err.message);
+  } finally {
+    setBtnsDisabled(false);
+  }
+}
+
+async function pullFromGist() {
+  const token  = tokenInput.value.trim();
+  const gistId = gistIdInput.value.trim() || localStorage.getItem(SYNC_GIST_KEY) || '';
+
+  if (!token)  { setModalStatus('error', 'Please enter a Personal Access Token.'); return; }
+  if (!gistId) { setModalStatus('error', 'Please enter a Gist ID (or save first to create one).'); return; }
+
+  setModalStatus('busy', 'Loading from Gist…');
+  setBtnsDisabled(true);
+
+  try {
+    const pulled = await gistFetch(token, gistId);
+    if (!pulled) throw new Error('Gist is empty or file not found.');
+
+    localStorage.setItem(SYNC_TOKEN_KEY, token);
+    localStorage.setItem(SYNC_GIST_KEY,  gistId);
+
+    mergeFromGist(pulled);
+    const ts = new Date().toLocaleTimeString();
+    setModalStatus('ok', `Loaded ✓ — ${pulled.length} bookmarks synced.`);
+    setSyncStatus('ok', `Last synced ${ts} · Gist ${gistId.slice(0, 8)}…`);
+  } catch (err) {
+    setModalStatus('error', err.message);
+  } finally {
+    setBtnsDisabled(false);
+  }
+}
+
+async function gistFetch(token, gistId) {
+  token  = token  || localStorage.getItem(SYNC_TOKEN_KEY);
+  gistId = gistId || localStorage.getItem(SYNC_GIST_KEY);
+  if (!token || !gistId) return null;
+
+  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: gistHeaders(token),
+  });
+  if (!res.ok) throw new Error(`Could not fetch Gist (${res.status}).`);
+
+  const data    = await res.json();
+  const file    = data.files[GIST_FILENAME];
+  if (!file)    throw new Error(`File "${GIST_FILENAME}" not found in Gist.`);
+
+  return JSON.parse(file.content);
+}
+
+function mergeFromGist(remote) {
+  const existingIds = new Set(bookmarks.map(b => b.id));
+  const newOnes = remote
+    .filter(b => b.id && !existingIds.has(b.id))
+    .map(b => ({ category: DEFAULT_CAT, topics: [], ...b }));
+
+  // Replace all with remote (remote is source of truth on pull)
+  bookmarks = remote.map(b => ({ category: DEFAULT_CAT, topics: [], ...b }));
+  saveBookmarks();
+  renderAll();
+  renderFilterBar();
+  updateCategorySuggestions();
+}
+
+async function silentPush() {
+  try {
+    const token  = localStorage.getItem(SYNC_TOKEN_KEY);
+    const gistId = localStorage.getItem(SYNC_GIST_KEY);
+    if (!token || !gistId) return;
+
+    await fetch(`https://api.github.com/gists/${gistId}`, {
+      method:  'PATCH',
+      headers: gistHeaders(token),
+      body:    JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(bookmarks, null, 2) } } }),
+    });
+
+    const ts = new Date().toLocaleTimeString();
+    setSyncStatus('ok', `Last synced ${ts} · Gist ${gistId.slice(0, 8)}…`);
+  } catch { /* silent */ }
+}
+
+function disconnect() {
+  localStorage.removeItem(SYNC_TOKEN_KEY);
+  localStorage.removeItem(SYNC_GIST_KEY);
+  tokenInput.value  = '';
+  gistIdInput.value = '';
+  setModalStatus('ok', 'Disconnected from Gist sync.');
+  syncStatusBar.classList.add('hidden');
+}
+
+function gistHeaders(token) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept:        'application/vnd.github+json',
+    'Content-Type': 'application/json',
+  };
+}
+
+// ── Modal helpers ─────────────────────────────────────────────────────────────
+function openModal() {
+  syncModalStatus.classList.add('hidden');
+  syncModal.classList.remove('hidden');
+  tokenInput.focus();
+}
+
+function closeModal() {
+  syncModal.classList.add('hidden');
+}
+
+function setModalStatus(type, msg) {
+  syncModalStatus.className = `sync-modal-status ${type}`;
+  syncModalStatus.textContent = msg;
+  syncModalStatus.classList.remove('hidden');
+}
+
+function setBtnsDisabled(on) {
+  pushBtn.disabled = on;
+  pullBtn.disabled = on;
+}
+
+function setSyncStatus(type, msg) {
+  syncStatusBar.className = `sync-status-bar ${type}`;
+  syncStatusText.textContent = msg;
+  syncStatusBar.classList.remove('hidden');
 }
 
 // ── State helpers ─────────────────────────────────────────────────────────────
@@ -522,7 +769,7 @@ function clearError() {
 }
 
 function setLoading(on) {
-  addBtn.disabled = on;
+  addBtn.disabled   = on;
   addBtn.textContent = on ? 'ADDING…' : 'ADD →';
 }
 
