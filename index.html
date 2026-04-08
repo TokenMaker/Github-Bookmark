@@ -57,12 +57,38 @@
     <div class="header-rule"></div>
   </header>
 
-  <!-- ── Main ───────────────────────────────────────────────── -->
   <!-- ── Filter bar ───────────────────────────────────────────────── -->
   <div id="filter-bar" class="filter-bar hidden">
     <div class="filter-bar-inner">
       <button class="filter-tab active" data-category="__all__">ALL</button>
     </div>
+  </div>
+
+  <!-- ── Toolbar: search + sort ────────────────────────────────────── -->
+  <div id="toolbar" class="toolbar hidden">
+    <div class="toolbar-inner">
+      <div class="search-wrapper">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input
+          type="search"
+          id="search-input"
+          placeholder="Search repos, descriptions, languages…"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Search bookmarks"
+        />
+        <button id="search-clear" class="search-clear hidden" aria-label="Clear search">✕</button>
+      </div>
+      <div class="sort-wrapper">
+        <label for="sort-select" class="sort-label">SORT</label>
+        <select id="sort-select" aria-label="Sort bookmarks">
+          <option value="date">Date Added</option>
+          <option value="alpha">A → Z</option>
+          <option value="stars">Most Stars</option>
+        </select>
+      </div>
+    </div>
+    <p id="search-result-count" class="search-result-count hidden" aria-live="polite"></p>
   </div>
 
   <main id="main-content">

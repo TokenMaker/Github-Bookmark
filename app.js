@@ -15,11 +15,19 @@ const empty           = document.getElementById('empty-state');
 const footerCount     = document.getElementById('footer-count');
 const filterBar       = document.getElementById('filter-bar');
 const filterBarInner  = filterBar.querySelector('.filter-bar-inner');
+const toolbar         = document.getElementById('toolbar');
+const searchInput     = document.getElementById('search-input');
+const searchClear     = document.getElementById('search-clear');
+const searchCount     = document.getElementById('search-result-count');
+const sortSelect      = document.getElementById('sort-select');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let bookmarks      = loadBookmarks();
 let activeCategory = '__all__';
+let searchQuery    = '';
+let sortOrder      = 'date'; // 'date' | 'alpha' | 'stars'
 let urlDebounce    = null;
+let searchDebounce = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 renderAll();
@@ -29,6 +37,30 @@ updateCategorySuggestions();
 input.addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
 categoryInput.addEventListener('keydown', e => { if (e.key === 'Enter') handleAdd(); });
 addBtn.addEventListener('click', handleAdd);
+
+// Search
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    searchQuery = searchInput.value.trim().toLowerCase();
+    searchClear.classList.toggle('hidden', !searchQuery);
+    renderAll();
+  }, 150);
+});
+
+searchClear.addEventListener('click', () => {
+  searchInput.value = '';
+  searchQuery = '';
+  searchClear.classList.add('hidden');
+  searchInput.focus();
+  renderAll();
+});
+
+// Sort
+sortSelect.addEventListener('change', () => {
+  sortOrder = sortSelect.value;
+  renderAll();
+});
 
 // Smart suggestions while typing a URL
 input.addEventListener('input', () => {
@@ -208,21 +240,50 @@ async function fetchRepo(owner, repo) {
 function renderAll() {
   grid.innerHTML = '';
 
-  const visible = activeCategory === '__all__'
+  // 1. Category filter
+  let pool = activeCategory === '__all__'
     ? bookmarks
-    : bookmarks.filter(b => b.category === activeCategory);
+    : bookmarks.filter(b => (b.category || DEFAULT_CAT) === activeCategory);
 
-  if (visible.length === 0) { updateEmptyState(); return; }
+  // 2. Search filter
+  if (searchQuery) {
+    pool = pool.filter(b =>
+      b.fullName.toLowerCase().includes(searchQuery) ||
+      (b.description || '').toLowerCase().includes(searchQuery) ||
+      (b.language  || '').toLowerCase().includes(searchQuery) ||
+      (b.category  || '').toLowerCase().includes(searchQuery) ||
+      (b.topics    || []).some(t => t.toLowerCase().includes(searchQuery))
+    );
+  }
 
-  // Group by category
+  // 3. Sort
+  pool = [...pool].sort((a, b) => {
+    if (sortOrder === 'alpha') return a.fullName.localeCompare(b.fullName);
+    if (sortOrder === 'stars') return (b.stars || 0) - (a.stars || 0);
+    return b.addedAt - a.addedAt; // 'date' — newest first
+  });
+
+  // Update search result count
+  if (searchQuery) {
+    searchCount.textContent = pool.length === 0
+      ? `No results for "${searchInput.value.trim()}"`
+      : `${pool.length} result${pool.length === 1 ? '' : 's'} for "${searchInput.value.trim()}"`;
+    searchCount.classList.remove('hidden');
+  } else {
+    searchCount.classList.add('hidden');
+  }
+
+  if (pool.length === 0) { updateEmptyState(); return; }
+
+  // 4. Group by category (skip headers when searching or filtered to one category)
   const groups = new Map();
-  for (const b of visible) {
+  for (const b of pool) {
     const cat = b.category || DEFAULT_CAT;
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat).push(b);
   }
 
-  const showHeaders = activeCategory === '__all__' && groups.size > 1;
+  const showHeaders = !searchQuery && activeCategory === '__all__' && groups.size > 1;
 
   for (const [cat, items] of groups) {
     if (showHeaders) {
@@ -398,10 +459,13 @@ function removeBookmark(id) {
 // ── Filter bar ────────────────────────────────────────────────────────────────
 function renderFilterBar() {
   const categories = getCategories();
-  if (categories.length === 0) { filterBar.classList.add('hidden'); return; }
+  const hasBookmarks = bookmarks.length > 0;
 
-  filterBar.classList.remove('hidden');
+  filterBar.classList.toggle('hidden', !hasBookmarks);
+  toolbar.classList.toggle('hidden', !hasBookmarks);
+
   filterBarInner.innerHTML = '';
+  if (!hasBookmarks) return;
 
   filterBarInner.appendChild(makeTab('ALL', '__all__'));
   categories.forEach(cat => {
